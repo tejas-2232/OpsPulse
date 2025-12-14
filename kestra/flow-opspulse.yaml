@@ -1,0 +1,363 @@
+id: opspulse
+namespace: wakanda.demo
+
+description: |
+  OpsPulse: multi-system daily ops summary.
+  - Ingests CSVs from local /files (mounted into Kestra container)
+  - Computes DoD + 7-day deltas
+  - Uses Kestra AI Agent to return strict JSON (green/yellow/red)
+  - Emails on yellow/red, and always stores the report artifact
+
+triggers:
+  - id: daily
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 9 * * *"
+
+inputs:
+  - id: target_date
+    type: STRING
+    required: false
+    description: "Override target date (YYYY-MM-DD). Default = latest aligned day across CSVs"
+
+  - id: confidence_threshold
+    type: FLOAT
+    required: false
+    defaults: 0.65
+
+variables:
+  python_image: "python:3.11-slim"
+
+tasks:
+  - id: ingest_revenue
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: "{{ vars.python_image }}"
+    inputFiles:
+      revenue.csv: "file:///files/revenue.csv"
+    outputFiles:
+      - revenue.json
+    script: |
+      import csv, json
+
+      rows = []
+      with open('revenue.csv', newline='') as f:
+        for r in csv.DictReader(f):
+          r2 = dict(r)
+          r2['gross'] = float(r2['gross'])
+          r2['refunds'] = float(r2['refunds'])
+          r2['net'] = float(r2['net'])
+          r2['new_customers'] = float(r2['new_customers'])
+          rows.append(r2)
+
+      with open('revenue.json', 'w') as f:
+        json.dump({'system': 'revenue', 'rows': rows}, f)
+
+  - id: ingest_traffic
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: "{{ vars.python_image }}"
+    inputFiles:
+      traffic.csv: "file:///files/traffic.csv"
+    outputFiles:
+      - traffic.json
+    script: |
+      import csv, json
+
+      rows = []
+      with open('traffic.csv', newline='') as f:
+        for r in csv.DictReader(f):
+          r2 = dict(r)
+          r2['sessions'] = float(r2['sessions'])
+          r2['signups'] = float(r2['signups'])
+          r2['conversion_rate'] = float(r2['conversion_rate'])
+          rows.append(r2)
+
+      with open('traffic.json', 'w') as f:
+        json.dump({'system': 'traffic', 'rows': rows}, f)
+
+  - id: ingest_support
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: "{{ vars.python_image }}"
+    inputFiles:
+      support.csv: "file:///files/support.csv"
+    outputFiles:
+      - support.json
+    script: |
+      import csv, json
+
+      rows = []
+      with open('support.csv', newline='') as f:
+        for r in csv.DictReader(f):
+          r2 = dict(r)
+          r2['tickets_opened'] = float(r2['tickets_opened'])
+          r2['avg_first_response_mins'] = float(r2['avg_first_response_mins'])
+          r2['csat'] = float(r2['csat'])
+          rows.append(r2)
+
+      with open('support.json', 'w') as f:
+        json.dump({'system': 'support', 'rows': rows}, f)
+
+  - id: ingest_deploys
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: "{{ vars.python_image }}"
+    inputFiles:
+      deploys.csv: "file:///files/deploys.csv"
+    outputFiles:
+      - deploys.json
+    script: |
+      import csv, json
+
+      rows = []
+      with open('deploys.csv', newline='') as f:
+        for r in csv.DictReader(f):
+          r2 = dict(r)
+          r2['deploys'] = float(r2['deploys'])
+          r2['failures'] = float(r2['failures'])
+          r2['incident_count'] = float(r2['incident_count'])
+          rows.append(r2)
+
+      with open('deploys.json', 'w') as f:
+        json.dump({'system': 'deploys', 'rows': rows}, f)
+
+  - id: build_payload
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: "{{ vars.python_image }}"
+    inputFiles:
+      revenue.json: "{{ outputs.ingest_revenue.outputFiles['revenue.json'] }}"
+      traffic.json: "{{ outputs.ingest_traffic.outputFiles['traffic.json'] }}"
+      support.json: "{{ outputs.ingest_support.outputFiles['support.json'] }}"
+      deploys.json: "{{ outputs.ingest_deploys.outputFiles['deploys.json'] }}"
+    outputFiles:
+      - payload.json
+    script: |
+      import json
+
+      eps = 1e-9
+
+      def load_rows(path):
+        with open(path) as f:
+          return json.load(f)['rows']
+
+      def index_by_date(rows):
+        return {r['date']: r for r in rows}
+
+      def avg(vals):
+        return sum(vals) / max(len(vals), 1)
+
+      def compute_metric(series_by_date, dates, metric, target_date):
+        d = target_date
+        i = dates.index(d)
+        prev = dates[i - 1]
+        baseline_dates = dates[max(0, i - 7): i]
+
+        v = float(series_by_date[d][metric])
+        v_prev = float(series_by_date[prev][metric])
+        baseline = avg([float(series_by_date[x][metric]) for x in baseline_dates])
+
+        return {
+          'value': v,
+          'prev': v_prev,
+          'baseline_7d': baseline,
+          'dod_abs': v - v_prev,
+          'dod_pct': (v - v_prev) / max(abs(v_prev), eps),
+          'vs7d_abs': v - baseline,
+          'vs7d_pct': (v - baseline) / max(abs(baseline), eps),
+        }
+
+      revenue = load_rows('revenue.json')
+      traffic = load_rows('traffic.json')
+      support = load_rows('support.json')
+      deploys = load_rows('deploys.json')
+
+      rev = index_by_date(revenue)
+      tra = index_by_date(traffic)
+      sup = index_by_date(support)
+      dep = index_by_date(deploys)
+
+      dates = sorted(set(rev.keys()) & set(tra.keys()) & set(sup.keys()) & set(dep.keys()))
+      if len(dates) < 8:
+        raise Exception(f"Need at least 8 aligned days across systems, got {len(dates)}")
+
+      requested = "{{ inputs.target_date }}".strip()
+      target_date = requested or dates[-1]
+      if target_date not in dates:
+        raise Exception(f"target_date {target_date} not present in aligned dates")
+
+      metrics = {
+        'revenue': {
+          'gross': compute_metric(rev, dates, 'gross', target_date),
+          'refunds': compute_metric(rev, dates, 'refunds', target_date),
+          'net': compute_metric(rev, dates, 'net', target_date),
+          'new_customers': compute_metric(rev, dates, 'new_customers', target_date),
+        },
+        'traffic': {
+          'sessions': compute_metric(tra, dates, 'sessions', target_date),
+          'signups': compute_metric(tra, dates, 'signups', target_date),
+          'conversion_rate': compute_metric(tra, dates, 'conversion_rate', target_date),
+        },
+        'support': {
+          'tickets_opened': compute_metric(sup, dates, 'tickets_opened', target_date),
+          'avg_first_response_mins': compute_metric(sup, dates, 'avg_first_response_mins', target_date),
+          'csat': compute_metric(sup, dates, 'csat', target_date),
+        },
+        'deploys': {
+          'deploys': compute_metric(dep, dates, 'deploys', target_date),
+          'failures': compute_metric(dep, dates, 'failures', target_date),
+          'incident_count': compute_metric(dep, dates, 'incident_count', target_date),
+        },
+      }
+
+      guardrail_red = (
+        metrics['revenue']['refunds']['vs7d_pct'] >= 0.50 and
+        metrics['traffic']['conversion_rate']['vs7d_pct'] <= -0.15 and
+        (
+          metrics['support']['tickets_opened']['vs7d_pct'] >= 0.30 or
+          metrics['deploys']['incident_count']['vs7d_abs'] >= 1
+        )
+      )
+
+      payload = {
+        'target_date': target_date,
+        'dates': {
+          'latest': dates[-1],
+          'previous': dates[-2]
+        },
+        'metrics': metrics,
+        'guardrails': {
+          'force_red': bool(guardrail_red)
+        },
+        'raw_latest_rows': {
+          'revenue': rev[target_date],
+          'traffic': tra[target_date],
+          'support': sup[target_date],
+          'deploys': dep[target_date],
+        }
+      }
+
+      with open('payload.json', 'w') as f:
+        json.dump(payload, f)
+
+  - id: ai_summarize
+    type: io.kestra.plugin.ai.agent.AIAgent
+    provider:
+      type: io.kestra.plugin.ai.provider.OpenAI
+      apiKey: "{{ secret('OPENAI_API_KEY') }}"
+      modelName: "gpt-4o-mini"
+    responseFormat:
+      type: JSON
+      jsonSchema:
+        type: object
+        additionalProperties: false
+        required: [status, summary, top_drivers, recommended_actions, confidence]
+        properties:
+          status:
+            type: string
+            enum: [green, yellow, red]
+          summary:
+            type: string
+          top_drivers:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required: [system, metric, direction, evidence]
+              properties:
+                system: { type: string }
+                metric: { type: string }
+                direction: { type: string, enum: [up, down] }
+                evidence: { type: string }
+          recommended_actions:
+            type: array
+            items: { type: string }
+          confidence:
+            type: number
+            minimum: 0
+            maximum: 1
+    prompt: |
+      You are OpsPulse, an operations analyst.
+
+      You will receive a JSON payload with multiple systems’ metrics and their deltas.
+      Output MUST be valid JSON matching the schema.
+      Be concise and actionable.
+
+      Status rules:
+      - red: likely incident / revenue risk / customer-impacting degradation across 2+ systems
+      - yellow: concerning change that needs attention but not clearly an incident
+      - green: within normal variation
+
+      If payload.guardrails.force_red == true, status MUST be red and you MUST mention the guardrail.
+
+      Payload JSON:
+      {{ read(outputs.build_payload.outputFiles['payload.json']) }}
+
+  - id: decide
+    type: io.kestra.plugin.core.output.OutputValues
+    values:
+      agent_json: "{{ outputs.ai_summarize.textOutput | replace('```json', '') | replace('```', '') | trim }}"
+      raw_status: "{{ fromJson(outputs.ai_summarize.textOutput | replace('```json', '') | replace('```', '') | trim).status }}"
+      confidence: "{{ fromJson(outputs.ai_summarize.textOutput | replace('```json', '') | replace('```', '') | trim).confidence }}"
+      effective_status: >-
+        {% set cleaned = outputs.ai_summarize.textOutput | replace('```json', '') | replace('```', '') | trim %}
+        {% set s = fromJson(cleaned).status %}
+        {% set c = fromJson(cleaned).confidence %}
+        {% if s == 'green' and c < inputs.confidence_threshold %}
+        yellow
+        {% else %}
+        {{ s }}
+        {% endif %}
+
+  - id: notify
+    type: io.kestra.plugin.core.flow.Switch
+    value: "{{ outputs.decide.values.effective_status }}"
+    cases:
+      red:
+        - id: send_email_red
+          type: io.kestra.plugin.notifications.mail.MailSend
+          from: "{{ secret('EMAIL_FROM') }}"
+          to: "{{ secret('EMAIL_TO') }}"
+          host: "{{ secret('SMTP_HOST') }}"
+          port: "{{ secret('SMTP_PORT') }}"
+          username: "{{ secret('SMTP_USERNAME') }}"
+          password: "{{ secret('SMTP_PASSWORD') }}"
+          subject: "[OpsPulse RED] {{ fromJson(read(outputs.build_payload.outputFiles['payload.json'])).target_date }}"
+          plainTextContent: |
+            {{ outputs.ai_summarize.textOutput }}
+
+      yellow:
+        - id: send_email_yellow
+          type: io.kestra.plugin.notifications.mail.MailSend
+          from: "{{ secret('EMAIL_FROM') }}"
+          to: "{{ secret('EMAIL_TO') }}"
+          host: "{{ secret('SMTP_HOST') }}"
+          port: "{{ secret('SMTP_PORT') }}"
+          username: "{{ secret('SMTP_USERNAME') }}"
+          password: "{{ secret('SMTP_PASSWORD') }}"
+          subject: "[OpsPulse YELLOW] {{ fromJson(read(outputs.build_payload.outputFiles['payload.json'])).target_date }}"
+          plainTextContent: |
+            {{ outputs.ai_summarize.textOutput }}
+
+      green:
+        - id: log_green
+          type: io.kestra.plugin.core.log.Log
+          message: "OpsPulse green: {{ fromJson(outputs.ai_summarize.textOutput).summary }}"
+
+  - id: store_report
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    containerImage: "{{ vars.python_image }}"
+    outputFiles:
+      - opspulse-report.json
+    script: |
+      # Store the agent output as an execution artifact.
+      report = r"""{{ outputs.ai_summarize.textOutput }}"""
+      with open('opspulse-report.json', 'w', encoding='utf-8') as f:
+        f.write(report)
