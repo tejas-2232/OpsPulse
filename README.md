@@ -72,6 +72,11 @@ docker compose up -d
 - The workflow should produce a **yellow/red** report and send an email.
 - Every run stores the agent output as an execution artifact: `opspulse-report.json`.
 
+### Gantt chart progress showed in beautiful Kestra UI
+
+<img width="1936" height="1219" alt="image" src="https://github.com/user-attachments/assets/fbfcf131-7f5c-4276-92f6-a4f561fd8ed9" />
+
+
 ### Decision logic (high-level)
 
 - AI agent returns `{"status":"green|yellow|red", ... ,"confidence":0-1}`.
@@ -90,3 +95,4 @@ docker compose up -d
 
 - The Python script tasks run in Docker (via the Docker socket mount) using `python:3.11-slim`.
 - Local CSVs are accessed with `file:///files/...` and the repo `data/` directory is mounted into the Kestra container at `/files`.
+
