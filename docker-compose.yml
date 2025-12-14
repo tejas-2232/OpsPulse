@@ -1,0 +1,21 @@
+services:
+  kestra:
+    image: kestra/kestra:latest
+    pull_policy: always
+    user: "root"
+    command: server local --config /etc/kestra/config.yml
+    ports:
+      - "8090:8080"
+      - "8091:8081"
+    env_file:
+      - ./.env_encoded
+    volumes:
+      - ./kestra/config.yml:/etc/kestra/config.yml:ro
+      - kestra-data:/app/storage
+      - ./data:/files:ro
+      # If running `docker compose` from WSL/Linux, use the Unix socket:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.kestra-wd:/tmp/kestra-wd
+
+volumes:
+  kestra-data:
