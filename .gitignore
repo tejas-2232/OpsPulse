@@ -1,0 +1,67 @@
+# ---- Secrets / env ----
+.env
+.env.*
+*.env
+*.env.*
+
+# ---- OS / Windows ----
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---- macOS ----
+.DS_Store
+
+# ---- Linux ----
+*~
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.swp
+
+# ---- Cursor / local tooling ----
+.cursor/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Build outputs ----
+dist/
+build/
+
+# ---- Logs ----
+*.log
+
+# ---- Temporary / scratch files ----n.tmp*
+.tmp_*
+*.tmp
+*.bak
+
+# Specific scratch HTML files observed in this repo
+.tmp_access_local_files.html
+.tmp_aiagent.html
+
+# ---- Docker ----
+*.pid
+
+# ---- Kestra ----
+.kestra/
